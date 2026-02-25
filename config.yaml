@@ -1,0 +1,19 @@
+gateway:
+  bot_accounts: []  # Add bot usernames to prevent self-reply loops
+
+skills:
+  support:
+    model: "your-model-here"
+    r2r_search_limit: 5
+    max_context_chars: 16000
+  review:
+    model: "your-model-here"
+    max_diff_chars: 32000
+    ignore_patterns: ["*.lock", "*.min.js", "*.min.css", "package-lock.json", "yarn.lock"]
+  summarize:
+    model: "your-model-here"
+    max_context_chars: 24000
+  triage:
+    model: "your-model-here"
+    valid_priorities: ["P1", "P2", "P3", "P4"]
+    valid_labels: ["bug", "feature", "documentation", "security", "performance", "ux"]
