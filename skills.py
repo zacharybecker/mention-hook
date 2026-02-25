@@ -106,9 +106,15 @@ class BaseSkill(ABC):
 
 
 class SupportSkill(BaseSkill):
-    """Answer questions using the R2R knowledge base."""
+    """Answer questions using the R2R knowledge base.
+
+    Reusable for any R2R-backed skill — uses ``event.mention`` to select
+    the prompt file and response header, so the same class can be registered
+    under multiple names (e.g. ``support``, ``it-support``, ``project-support``).
+    """
 
     async def execute(self, event: Any, config: dict[str, Any]) -> str:
+        skill_name = event.mention
         question = event.mention_body
         results = await r2r_client.search(
             query=question,
@@ -123,11 +129,11 @@ class SupportSkill(BaseSkill):
         context = "\n\n---\n\n".join(context_parts)
         context = truncate(context, config.get("max_context_chars", 16000))
 
-        system_prompt = load_prompt("support")
+        system_prompt = load_prompt(skill_name)
         user_msg = f"## Context\n\n{context}\n\n## Question\n\n{question}"
 
         body = await call_llm(system_prompt, user_msg, config["model"])
-        return format_response("support", body)
+        return format_response(skill_name, body)
 
 
 class ReviewSkill(BaseSkill):
