@@ -105,12 +105,13 @@ class BaseSkill(ABC):
 # ---------------------------------------------------------------------------
 
 
-class SupportSkill(BaseSkill):
-    """Answer questions using the R2R knowledge base.
+class R2RSkill(BaseSkill):
+    """Generic R2R knowledge-base skill.
 
-    Reusable for any R2R-backed skill — uses ``event.mention`` to select
-    the prompt file and response header, so the same class can be registered
-    under multiple names (e.g. ``support``, ``it-support``, ``project-support``).
+    Searches R2R for context, then sends it with the user's question to the
+    LLM.  Uses ``event.mention`` to select the prompt file and response
+    header, so the same class can be registered under multiple names
+    (e.g. ``support``, ``it-support``, ``project-support``).
     """
 
     async def execute(self, event: Any, config: dict[str, Any]) -> str:
@@ -203,7 +204,7 @@ class SummarizeSkill(BaseSkill):
 # ---------------------------------------------------------------------------
 
 SKILL_REGISTRY: dict[str, type[BaseSkill]] = {
-    "support": SupportSkill,
+    "support": R2RSkill,
     "review": ReviewSkill,
     "summarize": SummarizeSkill,
 }
