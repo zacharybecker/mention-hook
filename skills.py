@@ -10,8 +10,9 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-import httpx
 from openai import AsyncOpenAI
+
+import r2r_client
 
 logger = logging.getLogger(__name__)
 
@@ -109,27 +110,15 @@ class SupportSkill(BaseSkill):
 
     async def execute(self, event: Any, config: dict[str, Any]) -> str:
         question = event.mention_body
-        r2r_base = os.environ["R2R_BASE_URL"]
-        r2r_key = os.environ.get("R2R_API_KEY", "")
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{r2r_base}/v3/retrieval/search",
-                headers={"Authorization": f"Bearer {r2r_key}"},
-                json={
-                    "query": question,
-                    "limit": config.get("r2r_search_limit", 5),
-                },
-            )
-            resp.raise_for_status()
-            results = resp.json().get("results", [])
+        results = await r2r_client.search(
+            query=question,
+            limit=config.get("r2r_search_limit", 5),
+        )
 
         # Build context from returned chunks
         context_parts: list[str] = []
         for i, chunk in enumerate(results, 1):
-            source = chunk.get("metadata", {}).get("title", f"chunk-{i}")
-            text = chunk.get("text", chunk.get("content", ""))
-            context_parts.append(f"[{i}] Source: {source}\n{text}")
+            context_parts.append(f"[{i}] Source: {chunk['source']}\n{chunk['text']}")
 
         context = "\n\n---\n\n".join(context_parts)
         context = truncate(context, config.get("max_context_chars", 16000))
