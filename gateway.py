@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import os
 import re
-import traceback
 from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
 import yaml
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, Header, Request, Response
+from fastapi import BackgroundTasks, FastAPI, Request
 from pydantic import BaseModel, Field
 
 from skills import SKILL_REGISTRY, SkillResponse, format_response
@@ -242,29 +239,6 @@ if os.environ.get("JIRA_BASE_URL") and os.environ.get("JIRA_API_TOKEN"):
 if os.environ.get("GITLAB_BASE_URL") and os.environ.get("GITLAB_API_TOKEN"):
     CLIENTS["gitlab"] = GitLabClient()
 
-# ---------------------------------------------------------------------------
-# Webhook verification
-# ---------------------------------------------------------------------------
-
-
-def verify_jira_signature(body: bytes, signature_header: str | None) -> bool:
-    secret = os.environ.get("JIRA_WEBHOOK_SECRET")
-    if not secret:
-        return True  # No secret configured, skip verification
-    if not signature_header:
-        return False
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, signature_header)
-
-
-def verify_gitlab_token(token_header: str | None) -> bool:
-    secret = os.environ.get("GITLAB_WEBHOOK_SECRET")
-    if not secret:
-        return True  # No secret configured, skip verification
-    if not token_header:
-        return False
-    return hmac.compare_digest(secret, token_header)
-
 
 # ---------------------------------------------------------------------------
 # Parsing functions
@@ -462,12 +436,8 @@ async def health():
 async def webhook_jira(
     request: Request,
     background_tasks: BackgroundTasks,
-    x_hub_signature: str | None = Header(None, alias="X-Hub-Signature"),
 ):
     body = await request.body()
-
-    if not verify_jira_signature(body, x_hub_signature):
-        return Response(status_code=401, content="Invalid signature")
 
     payload = await request.json()
     event = parse_jira_event(payload)
@@ -488,11 +458,7 @@ async def webhook_jira(
 async def webhook_gitlab(
     request: Request,
     background_tasks: BackgroundTasks,
-    x_gitlab_token: str | None = Header(None, alias="X-Gitlab-Token"),
 ):
-    if not verify_gitlab_token(x_gitlab_token):
-        return Response(status_code=401, content="Invalid token")
-
     payload = await request.json()
     event = parse_gitlab_event(payload)
     if not event:
