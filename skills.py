@@ -115,7 +115,8 @@ class R2RSkill(BaseSkill):
     """
 
     async def execute(self, event: Any, config: dict[str, Any]) -> str:
-        skill_name = event.mention
+        mention_name = event.mention
+        prompt_file = config.get("prompt_file", mention_name)
         question = event.mention_body
         results = await r2r_client.search(
             query=question,
@@ -130,19 +131,22 @@ class R2RSkill(BaseSkill):
         context = "\n\n---\n\n".join(context_parts)
         context = truncate(context, config.get("max_context_chars", 16000))
 
-        system_prompt = load_prompt(skill_name)
+        system_prompt = load_prompt(prompt_file)
         user_msg = f"## Context\n\n{context}\n\n## Question\n\n{question}"
 
         body = await call_llm(system_prompt, user_msg, config["model"])
-        return format_response(skill_name, body)
+        return format_response(mention_name, body)
 
 
 class ReviewSkill(BaseSkill):
     """Review merge request diffs for issues."""
 
     async def execute(self, event: Any, config: dict[str, Any]) -> str:
+        mention_name = event.mention
+        prompt_file = config.get("prompt_file", mention_name)
+
         if event.issue_type != "merge_request":
-            return format_response("review", "The review skill only works on merge requests.")
+            return format_response(mention_name, "The review skill only works on merge requests.")
 
         client = config["_client"]
         context = await client.fetch_context(event)
@@ -165,17 +169,20 @@ class ReviewSkill(BaseSkill):
         diff = truncate(diff, config.get("max_diff_chars", 32000), strategy="middle")
 
         mr_description = event.issue_description or ""
-        system_prompt = load_prompt("review")
+        system_prompt = load_prompt(prompt_file)
         user_msg = f"## MR Description\n\n{mr_description}\n\n## Diff\n\n```diff\n{diff}\n```"
 
         body = await call_llm(system_prompt, user_msg, config["model"])
-        return format_response("review", body)
+        return format_response(mention_name, body)
 
 
 class SummarizeSkill(BaseSkill):
     """Summarize an issue or MR discussion thread."""
 
     async def execute(self, event: Any, config: dict[str, Any]) -> str:
+        mention_name = event.mention
+        prompt_file = config.get("prompt_file", mention_name)
+
         client = config["_client"]
         context = await client.fetch_context(event)
         comments = context.get("comments", [])
@@ -194,9 +201,9 @@ class SummarizeSkill(BaseSkill):
         thread = "\n\n".join(parts)
         thread = truncate(thread, config.get("max_context_chars", 24000))
 
-        system_prompt = load_prompt("summarize")
+        system_prompt = load_prompt(prompt_file)
         body = await call_llm(system_prompt, thread, config["model"])
-        return format_response("summarize", body)
+        return format_response(mention_name, body)
 
 
 # ---------------------------------------------------------------------------

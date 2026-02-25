@@ -3,13 +3,19 @@ gateway:
 
 skills:
   support:
+    mention_name: "support"
+    prompt_file: "support"
     model: "your-model-here"
     r2r_search_limit: 5
     max_context_chars: 16000
   review:
+    mention_name: "review"
+    prompt_file: "review"
     model: "your-model-here"
     max_diff_chars: 32000
     ignore_patterns: ["*.lock", "*.min.js", "*.min.css", "package-lock.json", "yarn.lock"]
   summarize:
+    mention_name: "summarize"
+    prompt_file: "summarize"
     model: "your-model-here"
     max_context_chars: 24000

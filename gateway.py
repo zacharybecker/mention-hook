@@ -295,8 +295,9 @@ def route(event: NormalizedEvent) -> tuple[str, str] | None:
     if event.comment_author in bot_accounts:
         return None
 
-    for skill_name in CONFIG.get("skills", {}):
-        m = re.search(rf"@{re.escape(skill_name)}\b\s*(.*)", event.comment_body, re.DOTALL)
+    for skill_name, skill_cfg in CONFIG.get("skills", {}).items():
+        mention = skill_cfg.get("mention_name", skill_name)
+        m = re.search(rf"@{re.escape(mention)}\b\s*(.*)", event.comment_body, re.DOTALL)
         if m:
             return skill_name, m.group(1).strip()
 
@@ -324,8 +325,9 @@ async def dispatch(event: NormalizedEvent, skill_name: str, mention_body: str) -
     skill_config = dict(CONFIG.get("skills", {}).get(skill_name, {}))
     skill_config["_client"] = client
 
-    # Inject mention body into event
-    event = event.model_copy(update={"mention": skill_name, "mention_body": mention_body})
+    # Inject mention info into event
+    mention_name = skill_config.get("mention_name", skill_name)
+    event = event.model_copy(update={"mention": mention_name, "mention_body": mention_body})
 
     try:
         skill = skill_cls()
