@@ -239,50 +239,6 @@ class SummarizeSkill(BaseSkill):
         return SkillResponse(body=format_response("summarize", body))
 
 
-class TriageSkill(BaseSkill):
-    """Classify and triage an issue."""
-
-    async def execute(self, event: Any, config: dict[str, Any]) -> SkillResponse:
-        message = f"# {event.issue_title}\n\n{event.issue_description or ''}"
-
-        system_prompt = load_prompt("triage")
-        result = await call_llm_json(system_prompt, message, config["model"])
-
-        priority = result.get("priority", "P3")
-        labels = result.get("labels", [])
-        assignee = result.get("assignee")
-        reasoning = result.get("reasoning", "")
-
-        # Validate against config
-        valid_priorities = config.get("valid_priorities", ["P1", "P2", "P3", "P4"])
-        if priority not in valid_priorities:
-            priority = "P3"
-
-        valid_labels = config.get("valid_labels", [])
-        if valid_labels:
-            labels = [l for l in labels if l in valid_labels]
-
-        # Build side effects
-        side_effects: list[SideEffect] = []
-        if labels:
-            side_effects.append(SideEffect(action="add_labels", params={"labels": labels}))
-        if assignee:
-            side_effects.append(SideEffect(action="set_assignee", params={"assignee": assignee}))
-
-        body_lines = [
-            f"**Priority:** {priority}",
-            f"**Labels:** {', '.join(labels) if labels else 'none'}",
-            f"**Assignee:** {assignee or 'unassigned'}",
-            "",
-            f"**Reasoning:** {reasoning}",
-        ]
-
-        return SkillResponse(
-            body=format_response("triage", "\n".join(body_lines)),
-            side_effects=side_effects,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -291,5 +247,4 @@ SKILL_REGISTRY: dict[str, type[BaseSkill]] = {
     "support": SupportSkill,
     "review": ReviewSkill,
     "summarize": SummarizeSkill,
-    "triage": TriageSkill,
 }

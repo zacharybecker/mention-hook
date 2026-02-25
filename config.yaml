@@ -13,7 +13,3 @@ skills:
   summarize:
     model: "your-model-here"
     max_context_chars: 24000
-  triage:
-    model: "your-model-here"
-    valid_priorities: ["P1", "P2", "P3", "P4"]
-    valid_labels: ["bug", "feature", "documentation", "security", "performance", "ux"]
