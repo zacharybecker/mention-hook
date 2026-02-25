@@ -1,35 +1,43 @@
-"""R2R async client wrapper — singleton with admin login."""
+"""R2R async client wrapper — singleton with admin login and token refresh."""
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 
 from r2r import R2RAsyncClient
 
 logger = logging.getLogger(__name__)
 
 _client: R2RAsyncClient | None = None
-_logged_in: bool = False
+_login_time: float = 0
+_LOGIN_TTL: int = int(os.environ.get("R2R_LOGIN_TTL", "3600"))
 
 
 async def _get_client() -> R2RAsyncClient:
     """Return a module-level singleton R2RAsyncClient, logged in as admin."""
-    global _client, _logged_in
+    global _client, _login_time
 
     if _client is None:
         _client = R2RAsyncClient(
             base_url=os.environ["R2R_BASE_URL"],
         )
 
-    if not _logged_in:
-        email = os.environ["R2R_ADMIN_EMAIL"]
-        password = os.environ["R2R_ADMIN_PASSWORD"]
-        await _client.users.login(email, password)
-        _logged_in = True
-        logger.info("R2R admin login successful")
+    if _login_time == 0 or (time.monotonic() - _login_time) >= _LOGIN_TTL:
+        await _login()
 
     return _client
+
+
+async def _login() -> None:
+    """Authenticate with R2R and record the login timestamp."""
+    global _login_time
+    email = os.environ["R2R_ADMIN_EMAIL"]
+    password = os.environ["R2R_ADMIN_PASSWORD"]
+    await _client.users.login(email, password)
+    _login_time = time.monotonic()
+    logger.info("R2R admin login successful")
 
 
 async def search(query: str, limit: int = 5) -> list[dict]:
@@ -38,7 +46,13 @@ async def search(query: str, limit: int = 5) -> list[dict]:
     Returns a list of dicts with ``text`` and ``source`` keys.
     """
     client = await _get_client()
-    raw = await client.retrieval.search(query=query, limit=limit)
+    try:
+        raw = await client.retrieval.search(query=query, limit=limit)
+    except Exception:
+        # Token may have been revoked server-side — re-login and retry once.
+        logger.warning("R2R search failed, re-authenticating and retrying")
+        await _login()
+        raw = await client.retrieval.search(query=query, limit=limit)
 
     # Normalise into a simple list regardless of SDK response shape.
     results: list[dict] = []

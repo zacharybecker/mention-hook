@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -14,7 +15,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Request
 from pydantic import BaseModel, Field
 
-from skills import SKILL_REGISTRY, format_response
+from skills import SKILL_REGISTRY, PROMPTS_DIR, format_response
 
 load_dotenv()
 
@@ -53,6 +54,48 @@ def load_config() -> dict[str, Any]:
 
 load_config()
 
+
+def validate_config(config: dict[str, Any]) -> None:
+    """Validate skill configuration at startup. Raises on errors."""
+    skills = config.get("skills")
+    if not skills:
+        raise ValueError("Config must define at least one skill under 'skills'")
+
+    for name, cfg in skills.items():
+        if not cfg.get("model"):
+            raise ValueError(f"Skill '{name}' is missing required 'model' key")
+
+        prompt_file = cfg.get("prompt_file", cfg.get("mention_name", name))
+        prompt_path = PROMPTS_DIR / f"{prompt_file}.md"
+        if not prompt_path.is_file():
+            raise ValueError(
+                f"Skill '{name}' references prompt file '{prompt_file}' "
+                f"but {prompt_path} does not exist"
+            )
+
+        skill_type = SKILL_REGISTRY.get(name)
+        if not skill_type:
+            raise ValueError(
+                f"Skill '{name}' is not in SKILL_REGISTRY. "
+                f"Known skills: {list(SKILL_REGISTRY.keys())}"
+            )
+
+
+validate_config(CONFIG)
+
+# ---------------------------------------------------------------------------
+# Metrics counters
+# ---------------------------------------------------------------------------
+
+_metrics: dict[str, int] = {
+    "events_received": 0,
+    "events_ignored": 0,
+    "skills_dispatched": 0,
+    "skills_succeeded": 0,
+    "skills_failed": 0,
+}
+_metrics_start_time: float = time.monotonic()
+
 # ---------------------------------------------------------------------------
 # NormalizedEvent model
 # ---------------------------------------------------------------------------
@@ -78,6 +121,7 @@ class NormalizedEvent(BaseModel):
 # ---------------------------------------------------------------------------
 
 CLIENTS: dict[str, Any] = {}
+HTTP_CLIENT_TIMEOUT = int(os.environ.get("HTTP_CLIENT_TIMEOUT", "60"))
 
 
 class JiraClient:
@@ -89,7 +133,7 @@ class JiraClient:
             base_url=base_url,
             auth=(email, token),
             headers={"Content-Type": "application/json"},
-            timeout=30,
+            timeout=HTTP_CLIENT_TIMEOUT,
         )
 
     async def post_comment(self, event: NormalizedEvent, body: str) -> None:
@@ -132,7 +176,7 @@ class GitLabClient:
                 "PRIVATE-TOKEN": token,
                 "Content-Type": "application/json",
             },
-            timeout=30,
+            timeout=HTTP_CLIENT_TIMEOUT,
         )
 
     def _noteable_path(self, event: NormalizedEvent) -> str:
@@ -311,14 +355,18 @@ def route(event: NormalizedEvent) -> tuple[str, str] | None:
 
 async def dispatch(event: NormalizedEvent, skill_name: str, mention_body: str) -> None:
     """Instantiate a skill, execute it, and post the response."""
+    _metrics["skills_dispatched"] += 1
+
     client = CLIENTS.get(event.platform)
     if not client:
         logger.error("No client configured for platform %s", event.platform)
+        _metrics["skills_failed"] += 1
         return
 
     skill_cls = SKILL_REGISTRY.get(skill_name)
     if not skill_cls:
         logger.error("Unknown skill: %s", skill_name)
+        _metrics["skills_failed"] += 1
         return
 
     # Build skill config from global config
@@ -333,8 +381,10 @@ async def dispatch(event: NormalizedEvent, skill_name: str, mention_body: str) -
         skill = skill_cls()
         body = await skill.execute(event, skill_config)
         await client.post_comment(event, body)
+        _metrics["skills_succeeded"] += 1
 
     except Exception:
+        _metrics["skills_failed"] += 1
         logger.exception("Skill %s failed for event %s/%s", skill_name, event.platform, event.issue_id)
         try:
             error_body = format_response(
@@ -375,18 +425,30 @@ async def health():
     }
 
 
+@app.get("/metrics")
+async def metrics():
+    uptime_seconds = round(time.monotonic() - _metrics_start_time, 1)
+    return {
+        **_metrics,
+        "uptime_seconds": uptime_seconds,
+    }
+
+
 async def _handle_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
     parser,
 ):
+    _metrics["events_received"] += 1
     payload = await request.json()
     event = parser(payload)
     if not event:
+        _metrics["events_ignored"] += 1
         return {"status": "ignored", "reason": "unsupported event type"}
 
     match = route(event)
     if not match:
+        _metrics["events_ignored"] += 1
         return {"status": "ignored", "reason": "no skill mention found"}
 
     skill_name, mention_body = match
