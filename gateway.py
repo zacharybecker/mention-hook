@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Request
 from pydantic import BaseModel, Field
 
-from skills import SKILL_REGISTRY, SkillResponse, format_response
+from skills import SKILL_REGISTRY, format_response
 
 load_dotenv()
 
@@ -97,28 +97,6 @@ class JiraClient:
         resp = await self.http.post(url, json={"body": body})
         resp.raise_for_status()
 
-    async def apply_side_effect(self, event: NormalizedEvent, effect: Any) -> None:
-        issue_url = f"/rest/api/2/issue/{event.issue_id}"
-        if effect.action == "add_labels":
-            labels = effect.params.get("labels", [])
-            await self.http.put(
-                issue_url,
-                json={"update": {"labels": [{"add": l} for l in labels]}},
-            )
-        elif effect.action == "set_assignee":
-            assignee = effect.params.get("assignee", "")
-            await self.http.put(
-                issue_url,
-                json={"fields": {"assignee": {"name": assignee}}},
-            )
-        elif effect.action == "change_status":
-            transition_id = effect.params.get("transition_id")
-            if transition_id:
-                await self.http.post(
-                    f"{issue_url}/transitions",
-                    json={"transition": {"id": transition_id}},
-                )
-
     async def fetch_context(self, event: NormalizedEvent) -> dict[str, Any]:
         url = f"/rest/api/2/issue/{event.issue_id}?fields=comment,description,summary"
         resp = await self.http.get(url)
@@ -167,29 +145,6 @@ class GitLabClient:
         path = self._noteable_path(event)
         resp = await self.http.post(f"{path}/notes", json={"body": body})
         resp.raise_for_status()
-
-    async def apply_side_effect(self, event: NormalizedEvent, effect: Any) -> None:
-        path = self._noteable_path(event)
-        if effect.action == "add_labels":
-            labels = effect.params.get("labels", [])
-            # Fetch existing labels, merge, and update
-            resp = await self.http.get(path)
-            resp.raise_for_status()
-            existing = [l["name"] if isinstance(l, dict) else l for l in resp.json().get("labels", [])]
-            merged = list(set(existing + labels))
-            await self.http.put(path, json={"labels": ",".join(merged)})
-        elif effect.action == "set_assignee":
-            username = effect.params.get("assignee", "")
-            # Resolve username to user ID
-            resp = await self.http.get("/users", params={"username": username})
-            resp.raise_for_status()
-            users = resp.json()
-            if users:
-                user_id = users[0]["id"]
-                await self.http.put(path, json={"assignee_ids": [user_id]})
-        elif effect.action == "add_reaction":
-            emoji = effect.params.get("emoji", "thumbsup")
-            await self.http.post(f"{path}/award_emoji", json={"name": emoji})
 
     async def fetch_context(self, event: NormalizedEvent) -> dict[str, Any]:
         path = self._noteable_path(event)
@@ -334,23 +289,18 @@ def parse_gitlab_event(payload: dict[str, Any]) -> NormalizedEvent | None:
 # ---------------------------------------------------------------------------
 
 
-def route(event: NormalizedEvent) -> list[dict[str, str]]:
-    """Scan the comment body for @skill_name mentions and return matched skills."""
-    # Skip comments from bot accounts
+def route(event: NormalizedEvent) -> tuple[str, str] | None:
+    """Return the first ``(skill_name, mention_body)`` found, or *None*."""
     bot_accounts = CONFIG.get("gateway", {}).get("bot_accounts", [])
     if event.comment_author in bot_accounts:
-        return []
+        return None
 
-    skills_config = CONFIG.get("skills", {})
-    matches: list[dict[str, str]] = []
+    for skill_name in CONFIG.get("skills", {}):
+        m = re.search(rf"@{re.escape(skill_name)}\b\s*(.*)", event.comment_body, re.DOTALL)
+        if m:
+            return skill_name, m.group(1).strip()
 
-    for skill_name in skills_config:
-        pattern = rf"@{re.escape(skill_name)}\b(.*?)(?=@\w+|$)"
-        for m in re.finditer(pattern, event.comment_body, re.DOTALL):
-            mention_body = m.group(1).strip()
-            matches.append({"name": skill_name, "body": mention_body})
-
-    return matches
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +309,7 @@ def route(event: NormalizedEvent) -> list[dict[str, str]]:
 
 
 async def dispatch(event: NormalizedEvent, skill_name: str, mention_body: str) -> None:
-    """Instantiate a skill, execute it, post the response, and apply side effects."""
+    """Instantiate a skill, execute it, and post the response."""
     client = CLIENTS.get(event.platform)
     if not client:
         logger.error("No client configured for platform %s", event.platform)
@@ -379,17 +329,8 @@ async def dispatch(event: NormalizedEvent, skill_name: str, mention_body: str) -
 
     try:
         skill = skill_cls()
-        result: SkillResponse = await skill.execute(event, skill_config)
-
-        # Post the comment
-        await client.post_comment(event, result.body)
-
-        # Apply side effects
-        for effect in result.side_effects:
-            try:
-                await client.apply_side_effect(event, effect)
-            except Exception:
-                logger.exception("Failed to apply side effect %s", effect.action)
+        body = await skill.execute(event, skill_config)
+        await client.post_comment(event, body)
 
     except Exception:
         logger.exception("Skill %s failed for event %s/%s", skill_name, event.platform, event.issue_id)
@@ -432,43 +373,31 @@ async def health():
     }
 
 
-@app.post("/webhook/jira")
-async def webhook_jira(
+async def _handle_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
+    parser,
 ):
-    body = await request.body()
-
     payload = await request.json()
-    event = parse_jira_event(payload)
+    event = parser(payload)
     if not event:
         return {"status": "ignored", "reason": "unsupported event type"}
 
-    matches = route(event)
-    if not matches:
-        return {"status": "ignored", "reason": "no skill mentions found"}
+    match = route(event)
+    if not match:
+        return {"status": "ignored", "reason": "no skill mention found"}
 
-    for match in matches:
-        background_tasks.add_task(dispatch, event, match["name"], match["body"])
+    skill_name, mention_body = match
+    background_tasks.add_task(dispatch, event, skill_name, mention_body)
 
-    return {"status": "accepted", "skills": [m["name"] for m in matches]}
+    return {"status": "accepted", "skill": skill_name}
+
+
+@app.post("/webhook/jira")
+async def webhook_jira(request: Request, background_tasks: BackgroundTasks):
+    return await _handle_webhook(request, background_tasks, parse_jira_event)
 
 
 @app.post("/webhook/gitlab")
-async def webhook_gitlab(
-    request: Request,
-    background_tasks: BackgroundTasks,
-):
-    payload = await request.json()
-    event = parse_gitlab_event(payload)
-    if not event:
-        return {"status": "ignored", "reason": "unsupported event type"}
-
-    matches = route(event)
-    if not matches:
-        return {"status": "ignored", "reason": "no skill mentions found"}
-
-    for match in matches:
-        background_tasks.add_task(dispatch, event, match["name"], match["body"])
-
-    return {"status": "accepted", "skills": [m["name"] for m in matches]}
+async def webhook_gitlab(request: Request, background_tasks: BackgroundTasks):
+    return await _handle_webhook(request, background_tasks, parse_gitlab_event)

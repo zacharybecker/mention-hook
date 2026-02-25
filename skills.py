@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -13,26 +12,10 @@ from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
-
-# ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
-
-
-class SideEffect(BaseModel):
-    action: str  # "add_labels" | "set_assignee" | "change_status" | "add_reaction"
-    params: dict[str, Any]
-
-
-class SkillResponse(BaseModel):
-    body: str
-    side_effects: list[SideEffect] = Field(default_factory=list)
-
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -99,20 +82,6 @@ async def call_llm(
     return response.choices[0].message.content
 
 
-async def call_llm_json(
-    system_prompt: str,
-    user_message: str,
-    model: str,
-    max_tokens: int = 4096,
-) -> Any:
-    """Like :func:`call_llm` but parses the response as JSON."""
-    system_prompt += "\n\nRespond with valid JSON only."
-    raw = await call_llm(system_prompt, user_message, model, max_tokens)
-    # Strip optional markdown code fences
-    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", raw.strip())
-    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
-    return json.loads(cleaned)
-
 
 def format_response(skill_name: str, body: str) -> str:
     """Prefix a skill response with a bold @mention header."""
@@ -126,7 +95,7 @@ def format_response(skill_name: str, body: str) -> str:
 
 class BaseSkill(ABC):
     @abstractmethod
-    async def execute(self, event: Any, config: dict[str, Any]) -> SkillResponse:
+    async def execute(self, event: Any, config: dict[str, Any]) -> str:
         ...
 
 
@@ -138,7 +107,7 @@ class BaseSkill(ABC):
 class SupportSkill(BaseSkill):
     """Answer questions using the R2R knowledge base."""
 
-    async def execute(self, event: Any, config: dict[str, Any]) -> SkillResponse:
+    async def execute(self, event: Any, config: dict[str, Any]) -> str:
         question = event.mention_body
         r2r_base = os.environ["R2R_BASE_URL"]
         r2r_key = os.environ.get("R2R_API_KEY", "")
@@ -169,20 +138,15 @@ class SupportSkill(BaseSkill):
         user_msg = f"## Context\n\n{context}\n\n## Question\n\n{question}"
 
         body = await call_llm(system_prompt, user_msg, config["model"])
-        return SkillResponse(body=format_response("support", body))
+        return format_response("support", body)
 
 
 class ReviewSkill(BaseSkill):
     """Review merge request diffs for issues."""
 
-    async def execute(self, event: Any, config: dict[str, Any]) -> SkillResponse:
+    async def execute(self, event: Any, config: dict[str, Any]) -> str:
         if event.issue_type != "merge_request":
-            return SkillResponse(
-                body=format_response(
-                    "review",
-                    "The review skill only works on merge requests.",
-                )
-            )
+            return format_response("review", "The review skill only works on merge requests.")
 
         client = config["_client"]
         context = await client.fetch_context(event)
@@ -209,13 +173,13 @@ class ReviewSkill(BaseSkill):
         user_msg = f"## MR Description\n\n{mr_description}\n\n## Diff\n\n```diff\n{diff}\n```"
 
         body = await call_llm(system_prompt, user_msg, config["model"])
-        return SkillResponse(body=format_response("review", body))
+        return format_response("review", body)
 
 
 class SummarizeSkill(BaseSkill):
     """Summarize an issue or MR discussion thread."""
 
-    async def execute(self, event: Any, config: dict[str, Any]) -> SkillResponse:
+    async def execute(self, event: Any, config: dict[str, Any]) -> str:
         client = config["_client"]
         context = await client.fetch_context(event)
         comments = context.get("comments", [])
@@ -236,7 +200,7 @@ class SummarizeSkill(BaseSkill):
 
         system_prompt = load_prompt("summarize")
         body = await call_llm(system_prompt, thread, config["model"])
-        return SkillResponse(body=format_response("summarize", body))
+        return format_response("summarize", body)
 
 
 # ---------------------------------------------------------------------------
